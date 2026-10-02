@@ -44,6 +44,33 @@ a rutracker scraper; the scraper transport is configured via
 `warp-cli mode proxy`), empty = direct access. Partial scrape failures must
 never drop entries — merge incrementally with the previous snapshot.
 
+## Scraper (P1)
+
+```bash
+python3 scrape.py \
+  --previous catalog.json --previous-manifest manifest.json \
+  --output output --topics 6892780,6877101
+```
+
+- fetch: topic pages (rate-limited, browser UA); section listings via
+  `--section ID --section-limit N`; transport fully env-configured:
+  `SCRAPER_PROXY` (HTTP/SOCKS proxy) and `RUTRACKER_COOKIE`
+  (`bb_session=...`, authenticated session — cookies are not IP-portable).
+- anti-bot reality: anonymous fetches answer HTTP 403 with a Cloudflare
+  managed challenge. The scraper detects it (`ChallengeBlocked`) and exits 0
+  keeping the previous snapshot byte-identical — a blocked run publishes
+  nothing. Run the workflow with `mode: probe` for the empirical transport
+  matrix (direct / proxy / cookie / proxy+cookie) before relying on CI
+  scrapes.
+- merge: scraped raws go through `build_catalog` (overrides apply), then
+  merge normalized-over-normalized by infoHash — scraped wins, the rest is
+  kept stale and counted in the report. Coverage gate: a merge below 98% of
+  the previous snapshot exits 2 (veto — CI fails loudly instead of
+  publishing a shrunk catalog).
+- CI rotation: each scheduled run refreshes a rotating window of 120 known
+  topics (full pass in ~2 months at the 6h cadence); publish only when the
+  manifest sha256 changed.
+
 ## Validation gate (blocks publish)
 
 - JSON array, `1..20000` entries, payload `<= 48 MiB`

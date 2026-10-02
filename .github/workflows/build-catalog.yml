@@ -5,10 +5,18 @@ on:
     - cron: "23 */6 * * *"
   workflow_dispatch:
     inputs:
+      mode:
+        description: "build (scrape+publish) or probe (connectivity matrix only)"
+        required: false
+        default: "build"
       force_rebuild:
-        description: "Build a new release even when the seed is unchanged"
+        description: "Publish a new release even when the catalog is unchanged"
         required: false
         default: "false"
+      topics:
+        description: "Comma-separated topic ids (overrides rotation window)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -18,96 +26,148 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Empirical transport test (plan §3.1): direct vs SCRAPER_PROXY vs
+  # RUTRACKER_COOKIE against one real topic. Report-only, never publishes.
+  probe:
+    if: github.event.inputs.mode == 'probe'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe rutracker transports
+        shell: bash
+        env:
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
+          RUTRACKER_COOKIE: ${{ secrets.RUTRACKER_COOKIE }}
+        run: |
+          set -u
+          python3 - <<'EOF'
+          import os, urllib.request
+          url = "https://rutracker.org/forum/viewtopic.php?t=6892780"
+          for name, proxy, cookie in [
+                  ("direct", "", ""),
+                  ("proxy", os.environ.get("SCRAPER_PROXY", ""), ""),
+                  ("cookie", "", os.environ.get("RUTRACKER_COOKIE", "")),
+                  ("proxy+cookie", os.environ.get("SCRAPER_PROXY", ""),
+                   os.environ.get("RUTRACKER_COOKIE", ""))]:
+              if "proxy" in name and not proxy:
+                  print(f"{name}: skipped (no SCRAPER_PROXY secret)");
+                  continue
+              if "cookie" in name and not cookie:
+                  print(f"{name}: skipped (no RUTRACKER_COOKIE secret)");
+                  continue
+              handlers = []
+              if proxy:
+                  handlers.append(urllib.request.ProxyHandler(
+                      {"http": proxy, "https": proxy}))
+              opener = urllib.request.build_opener(*handlers)
+              headers = {"User-Agent": "Mozilla/5.0"}
+              if cookie:
+                  headers["Cookie"] = cookie
+              try:
+                  with opener.open(urllib.request.Request(url, headers=headers),
+                                    timeout=25) as r:
+                      body = r.read()
+                      challenged = b"Just a moment" in body
+                      print(f"{name}: HTTP {r.status} bytes={len(body)} "
+                            f"challenge={challenged}")
+              except Exception as e:
+                  print(f"{name}: ERROR {e}")
+          EOF
+
   build:
+    if: github.event.inputs.mode != 'probe'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test generator
+      - name: Test generator and scraper
         run: python3 -m unittest discover -s tests -v
 
-      - name: Resolve seed revision
-        id: sources
+      - name: Download previous snapshot
+        id: previous
         shell: bash
         run: |
           set -euo pipefail
-          # P0: seed is the last switch_games.json snapshot from pipensx.
-          # Not vendored here (27 MB); fetched at a pinned commit so the
-          # manifest sourceCommit stays reproducible. P1 replaces this
-          # with the rutracker scraper output (transport via SCRAPER_PROXY).
-          seed_file="${SEED_FILE:-seed/switch_games.json}"
-          if [[ ! -s "$seed_file" ]]; then
-            mkdir -p "$(dirname "$seed_file")"
-            curl -fsSL "https://raw.githubusercontent.com/i3sey/pipensx/main/resources/catalog/switch_games.json" \
-              -o "$seed_file"
-          fi
-          seed_sha="$(sha256sum "$seed_file" | cut -d' ' -f1)"
-          echo "seed_sha=$seed_sha" >> "$GITHUB_OUTPUT"
-          echo "seed_file=$seed_file" >> "$GITHUB_OUTPUT"
-          prev_sha=""
-          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/manifest.json" \
-            -o /tmp/previous-manifest.json || true
-          if [[ -s /tmp/previous-manifest.json ]]; then
-            prev_sha="$(jq -r .sourceCommit /tmp/previous-manifest.json)"
-          fi
-          changed=true
-          if [[ "$prev_sha" == "$seed_sha" && "${{ github.event.inputs.force_rebuild }}" != "true" ]]; then
-            changed=false
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
-          echo "tag=catalog-${seed_sha:0:12}-run-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/main/catalog.json" \
+            -o /tmp/previous-catalog.json
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/main/manifest.json" \
+            -o /tmp/previous-manifest.json
+          echo "previous_sha=$(jq -r .catalog.sha256 /tmp/previous-manifest.json)" \
+            >> "$GITHUB_OUTPUT"
 
-      - name: Build catalog
-        if: steps.sources.outputs.changed == 'true'
+      - name: Scrape rutracker topics
+        id: scrape
         shell: bash
         env:
           SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
+          RUTRACKER_COOKIE: ${{ secrets.RUTRACKER_COOKIE }}
         run: |
           set -euo pipefail
-          python3 build_catalog.py \
-            --seed "${{ steps.sources.outputs.seed_file }}" \
+          if [[ -n "${{ github.event.inputs.topics }}" ]]; then
+            topics="${{ github.event.inputs.topics }}"
+          else
+            # Rotating window over known topics: 120 per run, full pass in
+            # ~2 months at the 6h cadence. Keeps every run small enough to
+            # survive rate limits; merge keeps everything not refreshed.
+            topics="$(python3 -c "
+          import json
+          prev = json.load(open('/tmp/previous-catalog.json'))
+          tids = sorted({str(e.get('topic_id')) for e in prev if e.get('topic_id')})
+          import time
+          window = 120
+          start = ((int(time.time()) // 86400) * window) % max(1, len(tids))
+          print(','.join((tids + tids)[start:start + window]))")"
+          fi
+          # Coverage veto exits 2: partial scrape must never publish a
+          # shrunk catalog — fail loudly instead.
+          python3 scrape.py \
+            --previous /tmp/previous-catalog.json \
+            --previous-manifest /tmp/previous-manifest.json \
             --output output \
             --overrides overrides.json \
-            --source-commit "${{ steps.sources.outputs.seed_sha }}" \
-            --catalog-commit "$GITHUB_SHA" \
-            --catalog-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.sources.outputs.tag }}/catalog.json"
-          python3 - <<'EOF'
-          import json
-          manifest = json.load(open('output/manifest.json'))
-          catalog = open('output/catalog.json','rb').read()
-          import hashlib
-          assert manifest['schemaVersion'] == 2, 'manifest schemaVersion != 2'
-          assert manifest['catalog']['bytes'] == len(catalog), 'bytes mismatch'
-          assert manifest['catalog']['sha256'] == hashlib.sha256(catalog).hexdigest(), 'sha256 mismatch'
-          assert 0 < manifest['catalog']['entries'] <= 20000, 'entries out of range'
-          assert len(catalog) <= 48*1024*1024, 'catalog exceeds 48 MiB'
-          print(f"gate ok: entries={manifest['catalog']['entries']} bytes={len(catalog)}")
-          EOF
-          cp output/catalog.json catalog.json
-          cp output/manifest.json manifest.json
-          cp output/report.md report.md
+            --topics "$topics" \
+            --catalog-commit "$GITHUB_SHA"
+
+      - name: Decide publish
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          new_sha="$(jq -r .catalog.sha256 output/manifest.json)"
+          echo "new_sha=$new_sha" >> "$GITHUB_OUTPUT"
+          if [[ "$new_sha" == "${{ steps.previous.outputs.previous_sha }}" && \
+                "${{ github.event.inputs.force_rebuild }}" != "true" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=catalog-${new_sha:0:12}-run-${GITHUB_RUN_NUMBER}" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Publish immutable release
-        if: steps.sources.outputs.changed == 'true'
+        if: steps.publish.outputs.changed == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${{ steps.sources.outputs.tag }}" \
+          gh release create "${{ steps.publish.outputs.tag }}" \
             output/catalog.json output/manifest.json output/report.md \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Catalog ${{ steps.sources.outputs.tag }}" \
-            --notes "seed ${{ steps.sources.outputs.seed_sha }}" \
+            --title "Catalog ${{ steps.publish.outputs.tag }}" \
+            --notes "scrape merge sha ${{ steps.publish.outputs.new_sha }}" \
             --latest
 
       - name: Update main snapshot (raw channel)
-        if: steps.sources.outputs.changed == 'true'
+        if: steps.publish.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp output/catalog.json catalog.json
+          cp output/manifest.json manifest.json
+          cp output/report.md report.md
           git add catalog.json manifest.json report.md
           git diff --quiet --cached && echo "snapshot unchanged" && exit 0
           git commit -m "data: refresh catalog snapshot"
