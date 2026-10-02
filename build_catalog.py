@@ -275,9 +275,38 @@ def normalize_entry(raw: dict[str, Any], generated_at: int) -> dict[str, Any] | 
     if not isinstance(published, int) or published < 0:
         published = 0
 
-    interface, voice_note = parse_languages(raw.get("interface_lang"))
-    voice, _ = parse_languages(raw.get("voice_lang"))
-    players = parse_players(raw.get("multiplayer"))
+    def str_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [s for s in value if isinstance(s, str) and s][:16]
+
+    # v2 passthrough: already-structured records (e.g. a previous catalog
+    # used as seed) keep their structs instead of being re-parsed from
+    # free-text keys they no longer carry. This keeps the generator
+    # idempotent on its own output.
+    langs_raw = raw.get("languages")
+    if isinstance(langs_raw, dict) and (
+            langs_raw.get("interface") or langs_raw.get("voice") or
+            langs_raw.get("note")):
+        interface = str_list(langs_raw.get("interface"))
+        voice = str_list(langs_raw.get("voice"))
+        voice_note = str(langs_raw.get("note") or "")[:256]
+    else:
+        interface, voice_note = parse_languages(raw.get("interface_lang"))
+        voice, _ = parse_languages(raw.get("voice_lang"))
+    players_raw = raw.get("players")
+    if isinstance(players_raw, dict) and (
+            players_raw.get("min") or players_raw.get("max") or
+            players_raw.get("online")):
+        players = {
+            "min": players_raw["min"]
+            if isinstance(players_raw.get("min"), int) else 1,
+            "max": players_raw["max"]
+            if isinstance(players_raw.get("max"), int) else 1,
+            "online": players_raw.get("online") is True,
+        }
+    else:
+        players = parse_players(raw.get("multiplayer"))
 
     health = raw.get("health", "ok")
     if health not in HEALTH_OK:
@@ -308,7 +337,10 @@ def normalize_entry(raw: dict[str, Any], generated_at: int) -> dict[str, Any] | 
         "published_date": published,
         "health": health,
     }
-    package_type = parse_package_type(raw.get("title"), raw.get("image_format"))
+    package_type = raw.get("package_type")
+    if package_type not in PACKAGE_TYPES:
+        package_type = parse_package_type(raw.get("title"),
+                                          raw.get("image_format"))
     if package_type:
         entry["package_type"] = package_type
     version = read_str("version", 32) or read_str("version_name", 32)
@@ -320,7 +352,8 @@ def normalize_entry(raw: dict[str, Any], generated_at: int) -> dict[str, Any] | 
         "note": voice_note,
     }
     entry["players"] = players
-    performance = read_str("performance", 256)
+    performance = read_str("performance_note", 256) or \
+        read_str("performance", 256)
     if performance:
         entry["performance_note"] = performance
     if topic_id is None:

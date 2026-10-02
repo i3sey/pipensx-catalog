@@ -69,6 +69,18 @@ class BuildCatalogTests(unittest.TestCase):
         self.assertEqual(entry["published_date"], 0)
         self.assertEqual(entry["catalog_generated_at"], 1700000000)
 
+    def test_roundtrip_keeps_v2_structs(self):
+        once = build_catalog.normalize_entry(
+            raw(title="Game [NSZ][ENG]", interface_lang="Английский",
+                multiplayer="до 4 игроков", performance="Да",
+                title_id="0100A2301BDE8000"),
+            generated_at=1700000000)
+        assert once is not None
+        twice = build_catalog.normalize_entry(dict(once),
+                                              generated_at=1700000000)
+        assert twice is not None
+        self.assertEqual(twice, once)
+
     def test_http_cover_kept_for_seed_compat(self):
         entry = build_catalog.normalize_entry(
             raw(cover="http://images.vfl.ru/ii/164338/sample.jpg"),
