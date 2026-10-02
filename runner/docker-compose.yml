@@ -1,0 +1,21 @@
+services:
+  catalog-runner:
+    build: ..
+    image: pipensx-catalog-runner:1
+    env_file:
+      - .env
+    volumes:
+      # Persists last snapshot: ticks skip the 23 MB download when the
+      # manifest sha is unchanged. Named volume, ~25 MB.
+      - catalog-state:/state
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    # No restart policy: the host cron starts one container per tick.
+    # 0 */6 * * * docker compose -f /opt/pipensx-catalog/runner/docker-compose.yml
+    #   --env-file /opt/pipensx-catalog/runner/.env up --build --quiet-pull
+
+volumes:
+  catalog-state:

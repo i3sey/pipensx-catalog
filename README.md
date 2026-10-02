@@ -17,12 +17,16 @@ Two distribution channels (same pattern as `pipensx-metadata`):
 ```text
 pipensx-catalog/
   build_catalog.py   # seed -> catalog.json + manifest.json + report.md
+  scrape.py          # rutracker fetch + merge (never drops) + coverage gate
   overrides.json     # manual topic_id / rename / hide fixes
   schema.json        # JSON Schema v2 (CI gate)
   catalog.json       # latest built artifact (raw channel)
   manifest.json      # sha256/bytes/entries for the release channel
   report.md          # coverage, drops, diff counters
   tests/test_build_catalog.py
+  tests/test_scrape.py
+  Dockerfile         # runner image (scrape+publish, see below)
+  runner/            # entrypoint.sh, docker-compose.yml, env.example
   .github/workflows/build-catalog.yml  # cron 6h + dispatch + release
 ```
 
@@ -76,6 +80,32 @@ python3 scrape.py \
 - CI rotation: each scheduled run refreshes a rotating window of 120 known
   topics (full pass in ~2 months at the 6h cadence); publish only when the
   manifest sha256 changed.
+
+## VPS runner (Docker)
+
+For a stable-egress host (home server, static-IP VPS): one container per
+cron tick, nothing daemonic inside. Datacenter IPs are usually challenged
+too — the runner then just keeps the previous snapshot; `probe` tells the
+truth about your egress.
+
+```bash
+cp runner/env.example runner/.env   # fill RUTRACKER_COOKIE / GITHUB_TOKEN
+docker compose -f runner/docker-compose.yml --env-file runner/.env up --build
+MODE=probe docker compose -f runner/docker-compose.yml --env-file runner/.env up --build  # transport matrix
+```
+
+Host cron (every 6h), or `restart: unless-stopped` with your own scheduler:
+
+```cron
+0 */6 * * * docker compose -f /opt/pipensx-catalog/runner/docker-compose.yml --env-file /opt/pipensx-catalog/runner/.env up --build --quiet-pull >/var/log/catalog-runner.log 2>&1
+```
+
+Thrift (defaults): manifest-first (~500 B; the 23 MB snapshot downloads
+only when its sha changed, else the `/state` volume is reused), 60 topics
+per tick with 3 s delay (~10–15 MB traffic, ~1–2 min CPU on 1 core,
+<512 MB RAM — see compose limits), uploads only when the catalog actually
+changed. Needs `GITHUB_TOKEN` (Contents read/write) only for publishing;
+scraping alone works without it.
 
 ## Validation gate (blocks publish)
 
