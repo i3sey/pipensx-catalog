@@ -61,7 +61,13 @@ python3 scrape.py \
   keeping the previous snapshot byte-identical — a blocked run publishes
   nothing. Run the workflow with `mode: probe` for the empirical transport
   matrix (direct / proxy / cookie / proxy+cookie) before relying on CI
-  scrapes.
+  scrapes. Notes from the field (2026-10-02): a `bb_session` cookie alone
+  does NOT pass the managed challenge, and environments with rotating
+  egress IPs defeat cookies entirely (Cloudflare binds clearance to IP).
+  What works: a stable egress (home machine, static-IP VPS, or a
+  self-hosted runner) combined with `RUTRACKER_COOKIE`. Until then, run
+  `scrape.py` from a home machine and commit the seed — merge keeps it
+  incremental.
 - merge: scraped raws go through `build_catalog` (overrides apply), then
   merge normalized-over-normalized by infoHash — scraped wins, the rest is
   kept stale and counted in the report. Coverage gate: a merge below 98% of
