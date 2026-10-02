@@ -1,0 +1,114 @@
+name: Build catalog
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Build a new release even when the seed is unchanged"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pipensx-catalog
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test generator
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Resolve seed revision
+        id: sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # P0: seed is the last switch_games.json snapshot from pipensx.
+          # Not vendored here (27 MB); fetched at a pinned commit so the
+          # manifest sourceCommit stays reproducible. P1 replaces this
+          # with the rutracker scraper output (transport via SCRAPER_PROXY).
+          seed_file="${SEED_FILE:-seed/switch_games.json}"
+          if [[ ! -s "$seed_file" ]]; then
+            mkdir -p "$(dirname "$seed_file")"
+            curl -fsSL "https://raw.githubusercontent.com/i3sey/pipensx/main/resources/catalog/switch_games.json" \
+              -o "$seed_file"
+          fi
+          seed_sha="$(sha256sum "$seed_file" | cut -d' ' -f1)"
+          echo "seed_sha=$seed_sha" >> "$GITHUB_OUTPUT"
+          echo "seed_file=$seed_file" >> "$GITHUB_OUTPUT"
+          prev_sha=""
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/manifest.json" \
+            -o /tmp/previous-manifest.json || true
+          if [[ -s /tmp/previous-manifest.json ]]; then
+            prev_sha="$(jq -r .sourceCommit /tmp/previous-manifest.json)"
+          fi
+          changed=true
+          if [[ "$prev_sha" == "$seed_sha" && "${{ github.event.inputs.force_rebuild }}" != "true" ]]; then
+            changed=false
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "tag=catalog-${seed_sha:0:12}-run-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build catalog
+        if: steps.sources.outputs.changed == 'true'
+        shell: bash
+        env:
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
+        run: |
+          set -euo pipefail
+          python3 build_catalog.py \
+            --seed "${{ steps.sources.outputs.seed_file }}" \
+            --output output \
+            --overrides overrides.json \
+            --source-commit "${{ steps.sources.outputs.seed_sha }}" \
+            --catalog-commit "$GITHUB_SHA" \
+            --catalog-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.sources.outputs.tag }}/catalog.json"
+          python3 - <<'EOF'
+          import json
+          manifest = json.load(open('output/manifest.json'))
+          catalog = open('output/catalog.json','rb').read()
+          import hashlib
+          assert manifest['schemaVersion'] == 2, 'manifest schemaVersion != 2'
+          assert manifest['catalog']['bytes'] == len(catalog), 'bytes mismatch'
+          assert manifest['catalog']['sha256'] == hashlib.sha256(catalog).hexdigest(), 'sha256 mismatch'
+          assert 0 < manifest['catalog']['entries'] <= 20000, 'entries out of range'
+          assert len(catalog) <= 48*1024*1024, 'catalog exceeds 48 MiB'
+          print(f"gate ok: entries={manifest['catalog']['entries']} bytes={len(catalog)}")
+          EOF
+          cp output/catalog.json catalog.json
+          cp output/manifest.json manifest.json
+          cp output/report.md report.md
+
+      - name: Publish immutable release
+        if: steps.sources.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.sources.outputs.tag }}" \
+            output/catalog.json output/manifest.json output/report.md \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Catalog ${{ steps.sources.outputs.tag }}" \
+            --notes "seed ${{ steps.sources.outputs.seed_sha }}" \
+            --latest
+
+      - name: Update main snapshot (raw channel)
+        if: steps.sources.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add catalog.json manifest.json report.md
+          git diff --quiet --cached && echo "snapshot unchanged" && exit 0
+          git commit -m "data: refresh catalog snapshot"
+          git push origin HEAD:${GITHUB_REF_NAME}

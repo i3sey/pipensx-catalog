@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-02T05:56:32Z",
+  "catalogCommit": "local",
+  "sourceCommit": "seed-p0",
+  "catalog": {
+    "url": "https://github.com/i3sey/pipensx-catalog/releases/latest/download/catalog.json",
+    "sha256": "398192328bd3559f194b64c80a03100e38f90c28fe1cd25739cb4d7d31537de8",
+    "bytes": 23386550,
+    "entries": 7045
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/i3sey/pipensx-catalog/main/schema.json",
+  "title": "pipensx-catalog v2 entry",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 20000,
+  "items": {
+    "type": "object",
+    "required": ["title", "magnet", "cover", "size", "size_bytes", "catalog_generated_at", "published_date"],
+    "additionalProperties": true,
+    "properties": {
+      "title": { "type": "string", "minLength": 1, "maxLength": 1024 },
+      "magnet": { "type": "string", "maxLength": 2048, "pattern": "^magnet:\\?xt=urn:btih:" },
+      "cover": { "type": "string", "maxLength": 2048, "pattern": "^https?://" },
+      "size": { "type": "integer", "minimum": 1 },
+      "size_bytes": { "type": "integer", "minimum": 1 },
+      "package_type": { "enum": ["nsp", "nsz", "xci", "nro", "zip", "7z"] },
+      "version": { "type": "string", "maxLength": 32 },
+      "version_name": { "type": "string", "maxLength": 32 },
+      "title_id": { "type": "string", "pattern": "^[0-9A-F]{16}$" },
+      "topic_id": { "type": "integer", "minimum": 1 },
+      "url": { "type": "string", "maxLength": 2048, "pattern": "^https://" },
+      "year": { "type": "string", "maxLength": 32 },
+      "genre": { "type": "string", "maxLength": 256 },
+      "developer": { "type": "string", "maxLength": 256 },
+      "publisher": { "type": "string", "maxLength": 256 },
+      "description": { "type": "string", "maxLength": 4096 },
+      "screenshots": {
+        "type": "array", "maxItems": 6,
+        "items": { "type": "string", "maxLength": 2048, "pattern": "^https?://" }
+      },
+      "languages": {
+        "type": "object",
+        "required": ["interface", "voice"],
+        "properties": {
+          "interface": { "type": "array", "items": { "type": "string", "pattern": "^[a-z]{2}(-[A-Z]{2})?$" } },
+          "voice": { "type": "array", "items": { "type": "string", "pattern": "^[a-z]{2}(-[A-Z]{2})?$" } },
+          "note": { "type": "string", "maxLength": 256 }
+        }
+      },
+      "players": {
+        "type": "object",
+        "properties": {
+          "min": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "max": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "online": { "type": "boolean" }
+        }
+      },
+      "performance_note": { "type": "string", "maxLength": 256 },
+      "catalog_generated_at": { "type": "integer", "minimum": 0 },
+      "published_date": { "type": "integer", "minimum": 0 },
+      "health": { "enum": ["ok", "no_peers", "metadata_timeout", "tracker_not_registered", "replaced", "dead"] },
+      "failure_reason": { "type": "string", "maxLength": 512 },
+      "info_dict": { "type": "string" }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "_comment": "Manual corrections: topic_id -> base title_id (ends in 000), renames, hides. All applied entries are counted in report.md.",
+  "hide": [],
+  "title_id": {},
+  "rename": {}
+}
