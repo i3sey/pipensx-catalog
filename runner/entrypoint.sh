@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # pipensx-catalog runner entrypoint. One run = one tick (the host cron
 # starts a fresh container per tick; nothing daemonic lives inside).
 #
@@ -16,7 +16,7 @@ OUT=/tmp/run-out
 WINDOW="${TOPICS_WINDOW:-60}"
 DELAY="${SCRAPE_DELAY:-3}"
 TIMEOUT="${SCRAPE_TIMEOUT:-30}"
-if [ $# -gt 0 ]; then
+if [ -z "${MODE:-}" ] && [ $# -gt 0 ]; then
     MODE="$1"
 fi
 
@@ -142,6 +142,7 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
     exit 0
 fi
 
+[ -f "$OUT/report.md" ] || echo "# Catalog report" > "$OUT/report.md"
 TAG="catalog-${NEW_SHA:0:12}-vps-$(date +%s)"
 log "publishing $TAG"
 export TAG NEW_SHA REPO OUT
@@ -165,7 +166,7 @@ def api(url, data=None, raw=None, ctype="application/json"):
 release = api(f"https://api.github.com/repos/{repo}/releases", json.dumps({
     "tag_name": tag, "name": f"Catalog {tag}",
     "body": f"VPS runner merge sha {os.environ['NEW_SHA']}",
-    "make_latest": True}).encode())
+    "make_latest": "true"}).encode())
 upbase = release["upload_url"].split("{")[0]
 for name in ("catalog.json", "manifest.json", "report.md"):
     with open(f"{out}/{name}", "rb") as f:

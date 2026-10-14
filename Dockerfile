@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 runner
+RUN mkdir -p /state && chown -R runner:runner /state
 WORKDIR /app
 COPY build_catalog.py scrape.py overrides.json schema.json ./
 COPY runner/entrypoint.sh /usr/local/bin/entrypoint

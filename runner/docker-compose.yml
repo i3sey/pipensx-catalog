@@ -2,6 +2,8 @@ services:
   catalog-runner:
     build: ..
     image: pipensx-catalog-runner:1
+    environment:
+      - FORCE_PUBLISH
     env_file:
       - .env
     volumes:

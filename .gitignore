@@ -1,3 +1,7 @@
 __pycache__/
 output/
 *.pyc
+
+.env
+*.env
+runner/.env
