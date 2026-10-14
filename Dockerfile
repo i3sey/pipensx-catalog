@@ -11,8 +11,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application modules and schemas
-COPY manage_catalog.py storage.py extractor.py flaresolverr_client.py scraper.py export_catalog.py schema.json overrides.json ./
+# Copy application modules, schemas and baseline catalog
+COPY manage_catalog.py storage.py extractor.py flaresolverr_client.py scraper.py export_catalog.py schema.json overrides.json catalog.json ./
 
 # Entrypoint script
 COPY runner/entrypoint.sh /usr/local/bin/entrypoint

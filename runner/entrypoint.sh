@@ -15,7 +15,7 @@ OUT_DIR="/tmp/out"
 DB_PATH="${STATE_DIR}/catalog.db"
 FLARESOLVERR_HOST="${FLARESOLVERR_HOST:-flaresolverr}"
 FLARESOLVERR_URL="http://${FLARESOLVERR_HOST}:8191/v1"
-PAGES="${PAGES:-2}"
+PAGES="${PAGES:-5}"
 DELAY="${DELAY:-1.5}"
 FORCE_PUBLISH="${FORCE_PUBLISH:-0}"
 
@@ -51,20 +51,17 @@ fi
 mkdir -p "$STATE_DIR" "$OUT_DIR"
 rm -rf "${OUT_DIR:?}"/* 2>/dev/null || true
 
-# 1. Seed database on first run
-if [ ! -f "$DB_PATH" ]; then
-    log "Database not found in $DB_PATH. Preparing initial database..."
-    if [ -f "/app/catalog.json" ]; then
-        log "Seeding from local /app/catalog.json..."
-        python3 /app/manage_catalog.py seed --file /app/catalog.json --db "$DB_PATH"
+# 1. Sync baseline catalog into database (on first run or updating existing DB)
+if [ -f "/app/catalog.json" ]; then
+    log "Syncing baseline entries from /app/catalog.json into $DB_PATH..."
+    python3 /app/manage_catalog.py seed --file /app/catalog.json --db "$DB_PATH"
+elif [ ! -f "$DB_PATH" ]; then
+    log "Database not found in $DB_PATH. Downloading latest catalog.json release from GitHub (${REPO})..."
+    if curl -fsSL --max-time 180 "https://github.com/${REPO}/releases/latest/download/catalog.json" -o /tmp/bootstrap-catalog.json 2>/dev/null; then
+        python3 /app/manage_catalog.py seed --file /tmp/bootstrap-catalog.json --db "$DB_PATH"
+        rm -f /tmp/bootstrap-catalog.json
     else
-        log "Downloading latest catalog.json release from GitHub (${REPO})..."
-        if curl -fsSL --max-time 180 "https://github.com/${REPO}/releases/latest/download/catalog.json" -o /tmp/bootstrap-catalog.json 2>/dev/null; then
-            python3 /app/manage_catalog.py seed --file /tmp/bootstrap-catalog.json --db "$DB_PATH"
-            rm -f /tmp/bootstrap-catalog.json
-        else
-            log "Notice: Could not download remote bootstrap, starting with fresh empty database."
-        fi
+        log "Notice: Could not download remote bootstrap, starting with fresh empty database."
     fi
     log "Running initial TitleDB enrichment..."
     python3 /app/manage_catalog.py match-titledb --db "$DB_PATH"
