@@ -2,6 +2,5 @@ __pycache__/
 output/
 *.pyc
 .git/
-catalog.json
 manifest.json
 report.md
