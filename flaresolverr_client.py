@@ -19,7 +19,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_FLARESOLVERR_URL = "http://localhost:8191/v1"
-DEFAULT_TIMEOUT_MS = 60000
+DEFAULT_TIMEOUT_MS = int(os.environ.get("FLARESOLVERR_TIMEOUT_MS", "25000"))
+DEFAULT_RETRIES = int(os.environ.get("FLARESOLVERR_RETRIES", "2"))
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -164,7 +165,7 @@ class FlareSolverrClient:
         self,
         url: str,
         session_id: str | None = None,
-        retries: int = 3,
+        retries: int = DEFAULT_RETRIES,
         backoff: float = 2.0,
     ) -> str:
         """Fetch a page via FlareSolverr using request.get with retries and session recovery."""
@@ -181,7 +182,7 @@ class FlareSolverrClient:
         url: str,
         post_data: str | dict[str, Any],
         session_id: str | None = None,
-        retries: int = 3,
+        retries: int = DEFAULT_RETRIES,
         backoff: float = 2.0,
     ) -> str:
         """Perform a POST request via FlareSolverr with retries and session recovery."""
@@ -204,7 +205,7 @@ class FlareSolverrClient:
         url: str,
         post_data: str | None = None,
         session_id: str | None = None,
-        retries: int = 3,
+        retries: int = DEFAULT_RETRIES,
         backoff: float = 2.0,
     ) -> str:
         current_session = session_id or self.session_id or self.ensure_session()
