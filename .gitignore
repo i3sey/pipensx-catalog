@@ -1,7 +1,12 @@
 __pycache__/
 output/
 *.pyc
-
+*.db
+*.db-wal
+*.db-shm
+.cache/
+.venv/
 .env
-*.env
+.env.*
+!.env.example
 runner/.env

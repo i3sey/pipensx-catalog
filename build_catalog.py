@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Build pipensx-catalog v2 from a seed snapshot.
+"""Build pipensx-catalog v2 from raw records or a prior catalog snapshot.
 
-P0: seed is the last `switch_games.json` (Langegen fork of the data, not the
-code). P1 will replace the seed fetch with a rutracker scraper behind
-`SCRAPER_PROXY` (see README); this script's normalize/validate/publish
-contract stays the same.
+This module owns normalization, overrides, validation and artifact writing.
+Ongoing RuTracker discovery/enrichment lives in scrape.py; the build step
+itself never fetches a third-party catalog.
 
-Pipeline (plan SS3):
+Pipeline:
   raw {title, magnet, topic_id, url, ...} -> normalize -> overrides ->
   dedup by infoHash -> catalog.json + manifest.json + report.md
 
@@ -551,6 +550,11 @@ def render_report(manifest: dict[str, Any], stats: dict[str, Any]) -> str:
         f"- title_id overrides applied: "
         f"{stats.get('overriddenTitleId', 0)}",
         f"- renames applied: {stats.get('renamed', 0)}",
+        f"- Atom entries checked: {stats.get('atomEntries', 0)}",
+        f"- existing entries refreshed from Atom fallback: "
+        f"{stats.get('atomFallbacks', 0)}",
+        f"- Atom entries awaiting page enrichment: "
+        f"{stats.get('pendingAtomEntries', 0)}",
         "",
         "_Unmatched title_id rows are expected (homebrew/ports without an "
         "eShop record); they stay in the catalog, only the coverage counts "

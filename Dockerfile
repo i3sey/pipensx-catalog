@@ -1,21 +1,23 @@
-# pipensx-catalog runner: scrape + merge + publish on a schedule.
-# Lightweight by design: python-slim, no cron daemon inside (the host
-# triggers one run per tick), state volume avoids re-downloading the
-# 23 MB snapshot when nothing changed.
+# pipensx-catalog runner Dockerfile
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates curl \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 runner
-RUN mkdir -p /state && chown -R runner:runner /state
 WORKDIR /app
-COPY build_catalog.py scrape.py overrides.json schema.json ./
+
+# Install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application modules and schemas
+COPY manage_catalog.py storage.py extractor.py flaresolverr_client.py scraper.py export_catalog.py schema.json overrides.json ./
+
+# Entrypoint script
 COPY runner/entrypoint.sh /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint
 
-USER runner
 VOLUME /state
 ENTRYPOINT ["entrypoint"]
 CMD ["run"]

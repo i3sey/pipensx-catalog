@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-02T05:56:32Z",
+  "generatedAt": "2026-10-14T11:47:39Z",
   "catalogCommit": "local",
-  "sourceCommit": "seed-p0",
+  "sourceCommit": "local",
   "catalog": {
     "url": "https://github.com/i3sey/pipensx-catalog/releases/latest/download/catalog.json",
-    "sha256": "398192328bd3559f194b64c80a03100e38f90c28fe1cd25739cb4d7d31537de8",
-    "bytes": 23386550,
-    "entries": 7045
+    "sha256": "e05dcc053c4fb174e4d103c9e43f5b7b080e3d004cc8dc6619528ec0ba9040e5",
+    "bytes": 24211439,
+    "entries": 7094
   }
 }

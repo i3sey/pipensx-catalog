@@ -1,194 +1,235 @@
-#!/bin/bash
-# pipensx-catalog runner entrypoint. One run = one tick (the host cron
-# starts a fresh container per tick; nothing daemonic lives inside).
-#
-#   MODE=run    scrape + merge + publish when changed (default)
-#   MODE=probe  transport matrix only, publishes nothing
-#
-# Traffic thrift: the remote manifest (~500 B) is checked first; the
-# 23 MB snapshot downloads only when its sha256 actually changed, and
-# /state persists between ticks. A tick costs ~topics*page + overhead.
-set -u
+#!/bin/sh
+# pipensx-catalog VPS runner entrypoint
+# Executes one update cycle:
+# 1. Seeds SQLite /state/catalog.db if first run
+# 2. Waits for FlareSolverr service
+# 3. Runs scrape --update for recent RuTracker topics
+# 4. Enriches missing TitleIDs via TitleDB
+# 5. Exports catalog and validates against schema.json
+# 6. Publishes to GitHub Releases (latest) if changed or forced
+set -eu
 
 REPO="${GITHUB_REPO:-i3sey/pipensx-catalog}"
-STATE="${STATE_DIR:-/state}"
-OUT=/tmp/run-out
-WINDOW="${TOPICS_WINDOW:-60}"
-DELAY="${SCRAPE_DELAY:-3}"
-TIMEOUT="${SCRAPE_TIMEOUT:-30}"
-if [ -z "${MODE:-}" ] && [ $# -gt 0 ]; then
-    MODE="$1"
+STATE_DIR="${STATE_DIR:-/state}"
+OUT_DIR="/tmp/out"
+DB_PATH="${STATE_DIR}/catalog.db"
+FLARESOLVERR_HOST="${FLARESOLVERR_HOST:-flaresolverr}"
+FLARESOLVERR_URL="http://${FLARESOLVERR_HOST}:8191/v1"
+PAGES="${PAGES:-2}"
+DELAY="${DELAY:-1.5}"
+FORCE_PUBLISH="${FORCE_PUBLISH:-0}"
+
+log() {
+    echo "$(date '+%H:%M:%S') [runner] $*"
+}
+
+# Parse CLI arguments for flags
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f|force)
+            FORCE_PUBLISH=1
+            ;;
+        --probe|probe)
+            log "Probe mode requested. Testing FlareSolverr connection..."
+            if curl -s -X POST "$FLARESOLVERR_URL" -H "Content-Type: application/json" -d '{"cmd": "sessions.list"}' >/dev/null 2>&1; then
+                log "FlareSolverr connection at $FLARESOLVERR_URL: OK"
+            else
+                log "FlareSolverr connection at $FLARESOLVERR_URL: FAILED"
+            fi
+            exit 0
+            ;;
+    esac
+done
+
+if [ "$FORCE_PUBLISH" = "1" ] || [ "$FORCE_PUBLISH" = "true" ] || [ "$FORCE_PUBLISH" = "yes" ]; then
+    log "=================================================================="
+    log ">>> FORCE_PUBLISH ACTIVE: Will publish GitHub release unconditionally"
+    log "=================================================================="
+    FORCE_PUBLISH=1
 fi
 
-log() { echo "runner: $*"; }
+mkdir -p "$STATE_DIR" "$OUT_DIR"
+rm -rf "${OUT_DIR:?}"/* 2>/dev/null || true
 
-if [ "${MODE:-run}" = "probe" ]; then
-    exec python3 <<'EOF'
-import os, urllib.request
-url = "https://rutracker.org/forum/viewtopic.php?t=6892780"
-for name, proxy, cookie in [
-        ("direct", "", ""),
-        ("proxy", os.environ.get("SCRAPER_PROXY", ""), ""),
-        ("cookie", "", os.environ.get("RUTRACKER_COOKIE", "")),
-        ("proxy+cookie", os.environ.get("SCRAPER_PROXY", ""),
-         os.environ.get("RUTRACKER_COOKIE", ""))]:
-    if "proxy" in name and not proxy:
-        print(f"{name}: skipped (no SCRAPER_PROXY)");
-        continue
-    if "cookie" in name and not cookie:
-        print(f"{name}: skipped (no RUTRACKER_COOKIE)");
-        continue
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler(
-            {"http": proxy, "https": proxy}))
-    opener = urllib.request.build_opener(*handlers)
-    headers = {"User-Agent": "Mozilla/5.0"}
-    if cookie:
-        headers["Cookie"] = cookie
-    try:
-        with opener.open(urllib.request.Request(url, headers=headers),
-                          timeout=25) as r:
-            body = r.read()
-            print(f"{name}: HTTP {r.status} bytes={len(body)} "
-                  f"challenge={b'Just a moment' in body}")
-    except Exception as e:  # noqa: BLE001 - probe reports, never fails
-        print(f"{name}: ERROR {e}")
-EOF
-fi
-
-mkdir -p "$STATE" "$OUT"
-rm -rf "${OUT:?}/"* || true
-
-if ! curl -fsSL --max-time 60 \
-    "https://github.com/${REPO}/releases/latest/download/manifest.json" \
-    -o "$OUT/remote-manifest.json"; then
-    log "remote manifest unreachable, nothing to do"
-    exit 0
-fi
-REMOTE_SHA="$(python3 -c "
-import json;print(json.load(open('$OUT/remote-manifest.json'))['catalog']['sha256'])")"
-LOCAL_SHA=""
-if [ -s "$STATE/manifest.json" ] && [ -s "$STATE/catalog.json" ]; then
-    LOCAL_SHA="$(python3 -c "
-import json;print(json.load(open('$STATE/manifest.json'))['catalog']['sha256'])")"
-fi
-if [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ] \
-    && [ -z "${TOPICS_FORCE:-}" ]; then
-    log "state already at $REMOTE_SHA, refreshing topics only"
-    PREV="$STATE/catalog.json"
-    PREV_MANIFEST="$STATE/manifest.json"
-else
-    log "fetching snapshot for $REMOTE_SHA"
-    if ! curl -fsSL --max-time 300 \
-        "https://github.com/${REPO}/releases/latest/download/catalog.json" \
-        -o "$STATE/catalog.json"; then
-        log "snapshot download failed, keeping previous state (if any)"
-        if [ -s "$STATE/catalog.json" ] && [ -s "$STATE/manifest.json" ]; then
-            PREV="$STATE/catalog.json"
-            PREV_MANIFEST="$STATE/manifest.json"
-        else
-            log "no usable state, nothing to do"
-            exit 1
-        fi
+# 1. Seed database on first run
+if [ ! -f "$DB_PATH" ]; then
+    log "Database not found in $DB_PATH. Preparing initial database..."
+    if [ -f "/app/catalog.json" ]; then
+        log "Seeding from local /app/catalog.json..."
+        python3 /app/manage_catalog.py seed --file /app/catalog.json --db "$DB_PATH"
     else
-        cp "$OUT/remote-manifest.json" "$STATE/manifest.json"
-        PREV="$STATE/catalog.json"
-        PREV_MANIFEST="$STATE/manifest.json"
+        log "Downloading latest catalog.json release from GitHub (${REPO})..."
+        if curl -fsSL --max-time 180 "https://github.com/${REPO}/releases/latest/download/catalog.json" -o /tmp/bootstrap-catalog.json 2>/dev/null; then
+            python3 /app/manage_catalog.py seed --file /tmp/bootstrap-catalog.json --db "$DB_PATH"
+            rm -f /tmp/bootstrap-catalog.json
+        else
+            log "Notice: Could not download remote bootstrap, starting with fresh empty database."
+        fi
     fi
-fi
-
-if [ -n "${TOPICS:-}" ]; then
-    TOPIC_LIST="$TOPICS"
+    log "Running initial TitleDB enrichment..."
+    python3 /app/manage_catalog.py match-titledb --db "$DB_PATH"
 else
-    TOPIC_LIST="$(python3 -c "
-import json
-prev = json.load(open('$PREV'))
-tids = sorted({str(e.get('topic_id')) for e in prev if e.get('topic_id')})
-import time
-start = ((int(time.time()) // 86400) * $WINDOW) % max(1, len(tids))
-print(','.join((tids + tids)[start:start + $WINDOW]))")"
+    log "Existing database found in $DB_PATH."
 fi
 
-# Coverage veto exits 2: a shrunk merge fails loudly, publishes nothing.
-python3 /app/scrape.py \
-    --previous "$PREV" \
-    --previous-manifest "$PREV_MANIFEST" \
-    --output "$OUT" \
-    --overrides /app/overrides.json \
-    --topics "$TOPIC_LIST" \
-    --delay "$DELAY" \
-    --timeout "$TIMEOUT" \
-    --catalog-commit "vps-runner"
-SCRAPE_RC=$?
-if [ "$SCRAPE_RC" -eq 2 ]; then
-    log "VETO from coverage gate, not publishing"
-    exit 2
-elif [ "$SCRAPE_RC" -ne 0 ]; then
-    log "scrape failed rc=$SCRAPE_RC"
-    exit "$SCRAPE_RC"
+# Print current DB status
+python3 /app/manage_catalog.py status --db "$DB_PATH"
+
+# 2. Wait for FlareSolverr to be ready
+log "Waiting for FlareSolverr at $FLARESOLVERR_URL..."
+MAX_WAIT=60
+WAITED=0
+while [ "$WAITED" -lt "$MAX_WAIT" ]; do
+    if curl -s -X POST "$FLARESOLVERR_URL" -H "Content-Type: application/json" -d '{"cmd": "sessions.list"}' >/dev/null 2>&1; then
+        log "FlareSolverr is ready!"
+        break
+    fi
+    sleep 2
+    WAITED=$((WAITED + 2))
+done
+
+if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+    log "ERROR: FlareSolverr service not available at $FLARESOLVERR_URL after ${MAX_WAIT}s"
+    exit 1
 fi
 
-NEW_SHA="$(python3 -c "
-import json;print(json.load(open('$OUT/manifest.json'))['catalog']['sha256'])")"
-if [ "$NEW_SHA" = "$REMOTE_SHA" ] && [ -z "${FORCE_PUBLISH:-}" ]; then
-    log "unchanged ($NEW_SHA), state refreshed, no publish"
-    cp "$OUT/catalog.json" "$STATE/catalog.json"
-    cp "$OUT/manifest.json" "$STATE/manifest.json"
+# 3. Check remote release manifest sha
+REMOTE_SHA=""
+if curl -fsSL --max-time 30 "https://github.com/${REPO}/releases/latest/download/manifest.json" -o /tmp/remote-manifest.json 2>/dev/null; then
+    REMOTE_SHA="$(python3 -c "import json; print(json.load(open('/tmp/remote-manifest.json')).get('catalog', {}).get('sha256', ''))" 2>/dev/null || true)"
+    log "Current GitHub latest release SHA: ${REMOTE_SHA:-none}"
+else
+    log "No existing GitHub latest release found or unreachable."
+fi
+
+# 4. Run incremental scrape
+log "Running incremental update (pages=${PAGES}, delay=${DELAY}s)..."
+python3 /app/manage_catalog.py scrape --update --pages "$PAGES" --delay "$DELAY" --db "$DB_PATH" --flaresolverr-url "$FLARESOLVERR_URL"
+
+# 5. Run TitleDB matcher for any newly added topics without TitleID
+log "Running TitleDB matcher..."
+python3 /app/manage_catalog.py match-titledb --db "$DB_PATH"
+
+# 6. Export catalog artifacts
+log "Exporting catalog..."
+python3 /app/manage_catalog.py export --db "$DB_PATH" --output "$OUT_DIR" --schema /app/schema.json --overrides /app/overrides.json
+
+if [ ! -f "$OUT_DIR/manifest.json" ] || [ ! -f "$OUT_DIR/catalog.json" ]; then
+    log "ERROR: Exported files not found in $OUT_DIR"
+    exit 1
+fi
+
+NEW_SHA="$(python3 -c "import json; print(json.load(open('$OUT_DIR/manifest.json'))['catalog']['sha256'])")"
+ENTRIES="$(python3 -c "import json; print(json.load(open('$OUT_DIR/manifest.json'))['catalog']['entries'])")"
+BYTES="$(python3 -c "import json; print(json.load(open('$OUT_DIR/manifest.json'))['catalog']['bytes'])")"
+log "Built catalog SHA: $NEW_SHA ($ENTRIES entries, $BYTES bytes)"
+
+# 7. Check if changed (unless force publish is requested)
+if [ -n "$REMOTE_SHA" ] && [ "$NEW_SHA" = "$REMOTE_SHA" ] && [ "$FORCE_PUBLISH" != "1" ]; then
+    log "Catalog unchanged (SHA: $NEW_SHA). Nothing to publish. (Pass FORCE_PUBLISH=1 or --force to override)"
     exit 0
 fi
+
 if [ -z "${GITHUB_TOKEN:-}" ]; then
-    log "changed ($NEW_SHA) but no GITHUB_TOKEN, leaving files in $OUT"
+    log "WARNING: GITHUB_TOKEN not set. Skipping GitHub release publication."
+    log "Catalog files generated in $OUT_DIR."
     exit 0
 fi
 
-[ -f "$OUT/report.md" ] || echo "# Catalog report" > "$OUT/report.md"
-TAG="catalog-${NEW_SHA:0:12}-vps-$(date +%s)"
-log "publishing $TAG"
-export TAG NEW_SHA REPO OUT
+# 8. Publish to GitHub Releases (only releases, no git commits to main!)
+TAG="catalog-$(date -u +%Y%m%d-%H%M%S)"
+log "Publishing new GitHub release: $TAG (make_latest: true)..."
+
+export GITHUB_TOKEN REPO TAG NEW_SHA ENTRIES BYTES OUT_DIR
 python3 - <<'EOF'
-import json, os, urllib.request
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
 token = os.environ["GITHUB_TOKEN"]
 repo = os.environ["REPO"]
 tag = os.environ["TAG"]
-out = os.environ["OUT"]
+new_sha = os.environ["NEW_SHA"]
+entries = os.environ["ENTRIES"]
+bytes_count = os.environ["BYTES"]
+out_dir = os.environ["OUT_DIR"]
 
-def api(url, data=None, raw=None, ctype="application/json"):
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Authorization": f"Bearer {token}",
-                 "Accept": "application/vnd.github+json",
-                 "Content-Type": ctype,
-                 "User-Agent": "pipensx-catalog-runner/1"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r)
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "pipensx-catalog-runner/2.0",
+}
 
-release = api(f"https://api.github.com/repos/{repo}/releases", json.dumps({
-    "tag_name": tag, "name": f"Catalog {tag}",
-    "body": f"VPS runner merge sha {os.environ['NEW_SHA']}",
-    "make_latest": "true"}).encode())
-upbase = release["upload_url"].split("{")[0]
-for name in ("catalog.json", "manifest.json", "report.md"):
-    with open(f"{out}/{name}", "rb") as f:
-        api(f"{upbase}?name={name}", f.read(),
-            ctype="application/octet-stream")
-    print(f"runner: uploaded {name}")
-print(f"runner: released {tag}")
+# Create GitHub Release
+create_url = f"https://api.github.com/repos/{repo}/releases"
+release_body = {
+    "tag_name": tag,
+    "name": f"Catalog {tag}",
+    "body": (
+        f"Automated pipensx-catalog release\n\n"
+        f"- **Entries**: {entries}\n"
+        f"- **Size**: {int(bytes_count):,} bytes\n"
+        f"- **SHA-256**: `{new_sha}`\n"
+        f"- **Timestamp**: `{tag}`\n"
+    ),
+    "draft": False,
+    "prerelease": False,
+    "make_latest": "true",
+}
+
+req = urllib.request.Request(
+    create_url,
+    data=json.dumps(release_body).encode("utf-8"),
+    headers={**headers, "Content-Type": "application/json"},
+    method="POST",
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        release_data = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as exc:
+    err_msg = exc.read().decode("utf-8", errors="replace")
+    print(f"runner: Failed to create release HTTP {exc.code}: {err_msg}", file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print(f"runner: Failed to create release: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+html_url = release_data.get("html_url", f"https://github.com/{repo}/releases/tag/{tag}")
+upload_url_template = release_data.get("upload_url", "")
+upload_base = upload_url_template.split("{")[0]
+
+print(f"runner: Created GitHub Release object: {html_url}")
+
+# Upload catalog.json, manifest.json, report.md
+assets = ["catalog.json", "manifest.json", "report.md"]
+for asset_name in assets:
+    file_path = os.path.join(out_dir, asset_name)
+    if not os.path.exists(file_path):
+        continue
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    upload_url = f"{upload_base}?name={asset_name}"
+    upload_req = urllib.request.Request(
+        upload_url,
+        data=file_bytes,
+        headers={**headers, "Content-Type": "application/octet-stream"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(upload_req, timeout=120) as uresp:
+            print(f"runner: [OK] Uploaded asset '{asset_name}' ({len(file_bytes):,} bytes)")
+    except Exception as exc:
+        print(f"runner: [FAIL] Failed to upload asset {asset_name}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+print("=" * 60)
+print(f"runner: SUCCESS! Published release: {html_url}")
+print(f"runner: Latest release URL: https://github.com/{repo}/releases/latest")
+print("=" * 60)
 EOF
 
-log "pushing snapshot to main"
-rm -rf /tmp/repo && git clone --depth 1 \
-    "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" /tmp/repo
-cp "$OUT/catalog.json" "$OUT/manifest.json" "$OUT/report.md" /tmp/repo/
-cd /tmp/repo
-git config user.name "pipensx-catalog-runner"
-git config user.email "runner@local"
-git add catalog.json manifest.json report.md
-if git diff --quiet --cached; then
-    log "snapshot already current"
-else
-    git commit -m "data: refresh catalog snapshot ($TAG)" && git push origin HEAD:main
-fi
-cp "$OUT/catalog.json" "$STATE/catalog.json"
-cp "$OUT/manifest.json" "$STATE/manifest.json"
-log "done"
+log "Job finished successfully."

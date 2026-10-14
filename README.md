@@ -16,18 +16,45 @@ Two distribution channels (same pattern as `pipensx-metadata`):
 
 ```text
 pipensx-catalog/
-  build_catalog.py   # seed -> catalog.json + manifest.json + report.md
-  scrape.py          # rutracker fetch + merge (never drops) + coverage gate
-  overrides.json     # manual topic_id / rename / hide fixes
-  schema.json        # JSON Schema v2 (CI gate)
-  catalog.json       # latest built artifact (raw channel)
-  manifest.json      # sha256/bytes/entries for the release channel
-  report.md          # coverage, drops, diff counters
-  tests/test_build_catalog.py
-  tests/test_scrape.py
-  Dockerfile         # runner image (scrape+publish, see below)
-  runner/            # entrypoint.sh, docker-compose.yml, env.example
-  .github/workflows/build-catalog.yml  # cron 6h + dispatch + release
+  manage_catalog.py    # Unified CLI: status, scrape, export, match-titledb, seed
+  flaresolverr_client.py # FlareSolverr API client with session recovery & exponential backoff
+  storage.py           # SQLite storage with resume support (topics, topic_details, catalog_entries)
+  extractor.py         # TitleID regex [0100...], Base/Update/DLC mapping, TitleDB matcher
+  scraper.py           # RuTracker scraper orchestrator (--full / --update)
+  export_catalog.py    # Artifact generator (catalog.json, manifest.json, report.md)
+  requirements.txt     # Lightweight dependencies (curl-cffi, jsonschema)
+  overrides.json       # Manual topic_id / rename / hide fixes
+  schema.json          # JSON Schema v2 (CI gate)
+  catalog.json         # Latest built artifact (7,094 entries, 27.6 TB)
+  manifest.json        # Release manifest (sha256/bytes/entries)
+  report.md            # Coverage, drops, diff counters
+  tests/               # Unit tests (storage, extractor, flaresolverr, scraper, export, CLI)
+  Dockerfile           # Lightweight runner image for VPS
+  runner/              # entrypoint.sh, docker-compose.yml, env.example, README.md
+  .github/workflows/
+    docker-ci.yml      # CI/CD: runs unit tests and pushes image to GHCR
+```
+
+## CLI Usage (manage_catalog.py)
+
+```bash
+# View current database statistics
+python3 manage_catalog.py status --db catalog.db
+
+# Seed database from existing catalog.json
+python3 manage_catalog.py seed --file catalog.json --db catalog.db
+
+# Match missing TitleIDs against pipensx-metadata TitleDB
+python3 manage_catalog.py match-titledb --db catalog.db
+
+# Incremental scrape of recent topics (e.g. daily cron)
+python3 manage_catalog.py scrape --update --pages 2 --db catalog.db
+
+# Full forum crawl with automatic progress resume
+python3 manage_catalog.py scrape --full --delay 1.5 --db catalog.db
+
+# Export catalog.json, manifest.json, report.md
+python3 manage_catalog.py export --db catalog.db --output output
 ```
 
 ## Local build
@@ -42,70 +69,85 @@ python3 build_catalog.py \
 python3 -c "import json; s=json.load(open('schema.json')); print('schema ok')"
 ```
 
-P0 seed: last `switch_games.json` snapshot. P1 replaces the seed fetch with
-a rutracker scraper; the scraper transport is configured via
-`SCRAPER_PROXY` (e.g. `socks5h://127.0.0.1:1080` for Cloudflare WARP
-`warp-cli mode proxy`), empty = direct access. Partial scrape failures must
-never drop entries — merge incrementally with the previous snapshot.
+The current `catalog.json` is the bootstrap snapshot. Future updates no
+longer fetch Langegen's JSON: GitHub Actions discovers recent topics from
+RuTracker's own Switch Atom feed and enriches them from the topic pages.
 
-## Scraper (P1)
+## Scraper (Atom + topic-page enrichment)
 
 ```bash
 python3 scrape.py \
   --previous catalog.json --previous-manifest manifest.json \
-  --output output --topics 6892780,6877101
+  --output output --atom --topics 6892780,6877101
 ```
 
-- fetch: topic pages (rate-limited, browser UA); section listings via
-  `--section ID --section-limit N`; transport fully env-configured:
-  `SCRAPER_PROXY` (HTTP/SOCKS proxy) and `RUTRACKER_COOKIE`
-  (`bb_session=...`, authenticated session — cookies are not IP-portable).
-- anti-bot reality: anonymous fetches answer HTTP 403 with a Cloudflare
-  managed challenge. The scraper detects it (`ChallengeBlocked`) and exits 0
-  keeping the previous snapshot byte-identical — a blocked run publishes
-  nothing. Run the workflow with `mode: probe` for the empirical transport
-  matrix (direct / proxy / cookie / proxy+cookie) before relying on CI
-  scrapes. Notes from the field (2026-10-02): a `bb_session` cookie alone
-  does NOT pass the managed challenge, and environments with rotating
-  egress IPs defeat cookies entirely (Cloudflare binds clearance to IP).
-  What works: a stable egress (home machine, static-IP VPS, or a
-  self-hosted runner) combined with `RUTRACKER_COOKIE`. Until then, run
-  `scrape.py` from a home machine and commit the seed — merge keeps it
-  incremental.
-- merge: scraped raws go through `build_catalog` (overrides apply), then
-  merge normalized-over-normalized by infoHash — scraped wins, the rest is
-  kept stale and counted in the report. Coverage gate: a merge below 98% of
-  the previous snapshot exits 2 (veto — CI fails loudly instead of
-  publishing a shrunk catalog).
-- CI rotation: each scheduled run refreshes a rotating window of 120 known
-  topics (full pass in ~2 months at the 6h cadence); publish only when the
-  manifest sha256 changed.
+- Atom: `https://feed.rutracker.cc/atom/f/1605.atom` supplies recent topic
+  IDs, titles, update timestamps, approximate title sizes, and magnet
+  enclosures. The feed has a rolling 50-entry window; it is for discovery,
+  not historical backfill.
+- Enrichment: each discovered topic is fetched for its cover, screenshots,
+  description, size, language/developer fields, and Title ID. If a known
+  topic page is blocked, its Atom title/magnet can still refresh the existing
+  row while retaining its previous rich metadata (rounded feed size only
+  fills a missing size). A new row without a page-derived cover is held out
+  rather than published incomplete.
+- Merge: topic ID is the primary key, then entries are deduplicated by
+  infohash. A re-upload with a new hash replaces the old row. Empty fields
+  from a partial fetch never erase existing metadata. The 98% coverage gate
+  prevents accidental catalog shrinkage.
+- Topic-page transport uses `curl_cffi` browser impersonation when installed
+  (stdlib compatibility request otherwise), then a persistent
+  `undetected_chromedriver` session on a challenge/invalid page.
+  The browser path waits for forum content, tries a visible Turnstile control,
+  and reuses that browser for the rest of the run. `SCRAPER_PROXY` is optional.
+- `RUTRACKER_COOKIE` is an optional authentication Cookie header. Atom requests
+  never receive it; the browser fallback does not transplant an old
+  `cf_clearance` from another client, and instead lets its own browser session
+  obtain clearance. Store cookies only in an ignored local env file or GitHub
+  secrets, never in commits or chat.
+- `requirements.txt` installs the lightweight TLS-impersonation client.
+  Browser fallback additionally needs `requirements-browser.txt` and a local
+  Chrome/Chromium binary. The current small Docker image intentionally omits
+  Chrome; it cannot run the browser fallback until built with browser support
+  and given substantially more memory.
+- Local one-topic transport probe (does not publish):
+  `python3 -m venv .venv && .venv/bin/pip install -r requirements-browser.txt`
+  followed by `.venv/bin/python scripts/probe_rutracker.py`. It uses the first
+  current Atom item and the configured transport; `RUTRACKER_COOKIE` may be
+  supplied through the local environment. A successful Atom request alone
+  does not prove topic-page enrichment will work.
+- `mode: probe` reports basic connectivity without publishing. The default
+  lightweight Docker image has `curl_cffi` but no Chrome/UC installation, so
+  it cannot perform the browser fallback described above.
+- GitHub Actions runs daily at 06:23 UTC: recent Atom topics plus a rotating
+  window of 120 older topics. It only creates a release when catalog content
+  changes. `workflow_dispatch` supports connectivity probes and explicit IDs.
+- The feed host's `robots.txt` currently disallows crawlers. Automated polling
+  is therefore kept to a low daily frequency; check RuTracker's rules before
+  enabling a persistent schedule.
 
-## VPS runner (Docker)
+## VPS Runner (Docker & Cron)
 
-For a stable-egress host (home server, static-IP VPS): one container per
-cron tick, nothing daemonic inside. Datacenter IPs are usually challenged
-too — the runner then just keeps the previous snapshot; `probe` tells the
-truth about your egress.
+Runs on any host with Docker and publishes new releases to GitHub Releases:
 
 ```bash
-cp runner/env.example runner/.env   # fill RUTRACKER_COOKIE / GITHUB_TOKEN
-docker compose -f runner/docker-compose.yml --env-file runner/.env up --build
-MODE=probe docker compose -f runner/docker-compose.yml --env-file runner/.env up --build  # transport matrix
+cd runner
+cp env.example .env
+chmod 600 .env
+# Fill GITHUB_TOKEN and RUTRACKER_COOKIE in .env
+docker compose up --build
 ```
 
-Host cron (every 6h), or `restart: unless-stopped` with your own scheduler:
+Host cron (e.g. daily at 03:30):
 
 ```cron
-0 */6 * * * docker compose -f /opt/pipensx-catalog/runner/docker-compose.yml --env-file /opt/pipensx-catalog/runner/.env up --build --quiet-pull >/var/log/catalog-runner.log 2>&1
+30 3 * * * cd /opt/pipensx-catalog/runner && docker compose pull catalog-runner && docker compose up --abort-on-container-exit >> /var/log/catalog-runner.log 2>&1
 ```
 
-Thrift (defaults): manifest-first (~500 B; the 23 MB snapshot downloads
-only when its sha changed, else the `/state` volume is reused), 60 topics
-per tick with 3 s delay (~10–15 MB traffic, ~1–2 min CPU on 1 core,
-<512 MB RAM — see compose limits), uploads only when the catalog actually
-changed. Needs `GITHUB_TOKEN` (Contents read/write) only for publishing;
-scraping alone works without it.
+- FlareSolverr handles Cloudflare challenges and passes authenticated session cookies.
+- Runner updates SQLite state in persistent volume `catalog-data:/state`.
+- Creates a new GitHub Release (`releases/latest`) only when content changed.
+- Does not pollute `main` git history with heavy commits.
 
 ## Validation gate (blocks publish)
 

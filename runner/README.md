@@ -1,102 +1,86 @@
-# VPS-раннер каталога
+# VPS-раннер каталога pipensx
 
-Раз в 6 часов докачивает окно топиков с RuTracker, сливает с прошлым
-снапшотом и публикует релиз, если данные изменились. Один контейнер на
-один тик крона, внутри демонов нет.
+Автономный планировщик на базе Docker Compose:
+- **`flaresolverr`**: решает Cloudflare и передает сессионные куки для доступа к спискам файлов (`viewtorrent.php`).
+- **`catalog-runner`**: догружает новые и обновленные раздачи в персистентную SQLite-базу (`/state/catalog.db`), обогащает их через TitleDB (`pipensx-metadata`), валидирует по `schema.json` v2 и выпускает новый GitHub Release при наличии изменений.
+- **Ветка `main` не засоряется** тяжелыми автокоммитами (все релизы выходят строго в GitHub Releases `latest`).
 
-## Требования
+---
 
-- Любой VPS с Docker + Docker Compose v2 и выходом в интернет.
-- ~1 ГБ диска (образ ~320 МБ + state ~25 МБ + запас), 1 CPU / 512 МБ RAM.
-- GitHub-токен с записью в Contents репозитория каталога (публикация).
-- Куки RuTracker (скрапинг). Без них раннер просто держит прошлый
-  снапшот — ничего не ломает, но и не обновляет.
+## 1. Подготовка на VPS
 
-## Установка
-
+Склонируй репозиторий (или скопируй только папку `runner/`):
 ```bash
 git clone https://github.com/i3sey/pipensx-catalog.git /opt/pipensx-catalog
-cp /opt/pipensx-catalog/runner/env.example /opt/pipensx-catalog/runner/.env
-chmod 600 /opt/pipensx-catalog/runner/.env
+cd /opt/pipensx-catalog/runner
+cp env.example .env
+chmod 600 .env
 ```
 
-Заполни `.env`:
+Заполни параметры в `.env`:
+```ini
+GITHUB_REPO=i3sey/pipensx-catalog
+# GitHub Personal Access Token (classic со scope "repo" или fine-grained с "Contents: Read & Write")
+GITHUB_TOKEN=ghp_...
 
-| Переменная | Обязательно | Что это |
-|---|---|---|
-| `GITHUB_REPO` | да | `i3sey/pipensx-catalog` (уже в примере) |
-| `GITHUB_TOKEN` | для публикации | Classic PAT со scope `repo` или fine-grained с Contents read/write |
-| `RUTRACKER_COOKIE` | для скрапинга | Полное значение Cookie из браузера (см. ниже) |
-| `SCRAPER_PROXY` | нет | Прокси только для трафика скрапера, напр. `socks5h://127.0.0.1:1080` |
-| `TOPICS_WINDOW` | нет | Топиков за тик, дефолт 60 |
-| `SCRAPE_DELAY` | нет | Пауза между запросами, дефолт 3 (сек) |
-| `TOPICS` | нет | Явный список топиков вместо окна ротации |
+# RuTracker cookies из браузера (bb_data и bb_session)
+RUTRACKER_COOKIE=bb_data=...; bb_session=...; bb_ssl=1
 
-**Куки из браузера** (Chrome/Firefox + расширение Cookie-Editor):
-1. Залогинься на rutracker.org и пройди проверку Cloudflare вручную.
-2. В Cookie-Editor скопируй значения и собери одной строкой:
-   `bb_guid=...; bb_t=...; bb_session=...; bb_ssl=1; cf_clearance=...`
-   (`cf_clearance` — самое важное, это пропуск через проверку; без него
-   почти наверняка будет challenge).
-3. Вставь строкой в `RUTRACKER_COOKIE`. Никуда больше куки не копируй,
-   в git она попасть не может (`.env` не коммитится — проверь `git status`).
+# Сколько свежих страниц форума сканировать за раз (по умолчанию 3 страницы = ~150 тем)
+PAGES=3
+DELAY=1.5
+```
 
-## Проверка перед кроном (обязательно)
+---
 
+## 2. Тестовый запуск вручную
+
+Стандартный запуск (проверяет изменения, если каталог не менялся — ничего не делает):
 ```bash
-cd /opt/pipensx-catalog
-MODE=probe docker compose -f runner/docker-compose.yml --env-file runner/.env up --build
+cd /opt/pipensx-catalog/runner
+docker compose up --build
 ```
 
-Смотри матрицу `direct / proxy / cookie / proxy+cookie`:
-- хотя бы одна строка без `challenge=True` и без `ERROR` — скрапинг
-  с этого VPS будет работать;
-- везде challenge — этот VPS для скрапинга не годится (IP дата-центра
-  в блоке). Раннер всё равно можно держать: он будет честно держать
-  прошлый снапшот, а обновления делать домашними прогонами.
+### Принудительный перевыпуск релиза (Force Flag)
+Чтобы принудительно выпустить и перезалить релиз на GitHub (для первой проверки или сброса), используй любой из способов:
 
-Пробный тик без публикации (токен можно пока не вписывать):
-
+**Способ 1 (через переменную окружения):**
 ```bash
-docker compose -f runner/docker-compose.yml --env-file runner/.env up --build
+FORCE_PUBLISH=1 docker compose up
+```
+*(или задай `FORCE_PUBLISH=1` в файле `.env`)*
+
+**Способ 2 (через флаг CLI):**
+```bash
+docker compose run --rm catalog-runner --force
 ```
 
-В конце должно быть `unchanged (...)` или `blocked by anti-bot` — оба
-исхода штатные. Раннер никогда не публикует битое: вето покрытия (exit 2)
-и проверка sha перед релизом встроены.
+В логах отобразятся подробные шаги:
+- Проверка связи с FlareSolverr и RuTracker.
+- Количество тем и статус в базе данных.
+- Список обновленных/обогащенных раздач.
+- Загрузка каждого файла (`catalog.json`, `manifest.json`, `report.md`) в GitHub Releases с точным размером.
+- Прямая ссылка на созданный релиз: `https://github.com/i3sey/pipensx-catalog/releases/latest`.
 
-## Крон
+---
+
+## 3. Автозапуск по ночам (Cron на хосте)
+
+Открой crontab на VPS (`crontab -e`) и добавь запуск раз в сутки (например, в 03:30 ночи):
 
 ```cron
-0 */6 * * * docker compose -f /opt/pipensx-catalog/runner/docker-compose.yml --env-file /opt/pipensx-catalog/runner/.env up --build --quiet-pull >/var/log/catalog-runner.log 2>&1
+30 3 * * * cd /opt/pipensx-catalog/runner && docker compose pull catalog-runner && docker compose up --abort-on-container-exit >> /var/log/catalog-runner.log 2>&1
 ```
 
-Логи тиков — в `/var/log/catalog-runner.log`. Что там искать:
-- `unchanged (...)` — всё свежее, делать нечего;
-- `publishing catalog-...` + `uploaded` — вышел новый релиз;
-- `VETO from coverage gate` — merge просел >2%: релиз НЕ вышел,
-  разбирайся (обычно — массовый бан топиков или сломанный парсер);
-- `blocked by anti-bot` — тик пропущен, следующий попробует снова.
+- `docker compose pull catalog-runner` автоматически подтянет свежий образ из GHCR, если в ветку `main` были внесены изменения.
+- Контейнер отработает за 1–2 минуты и завершится. Днем 0% потребления RAM/CPU.
 
-Обновление самого раннера (новый Dockerfile/скрипты):
+---
 
-```bash
-cd /opt/pipensx-catalog && git pull
-```
+## 4. CI/CD (GitHub Actions)
 
-(`--build` в кроне сам пересоберёт образ при изменениях.)
-
-## Кука протухла
-
-Симптом: раньше была строка без challenge, теперь везде challenge.
-Лечение: выгрузи куки из браузера заново, обнови `RUTRACKER_COOKIE`
-в `.env`. Сессии живут месяцами, процедура редкая.
-
-## Неполадки
-
-| Симптом | Причина / действие |
-|---|---|
-| `snapshot download failed, ... nothing to do` | Нет сети до GitHub или пустой state при первом запуске без сети — проверь связь, перезапусти |
-| `scrape failed rc=1` | Упал сам fetch всех топиков (сеть) — следующий тик повторит |
-| Контейнер ест больше 512 МБ | Подними лимит в `docker-compose.yml`, парсинг 23 МБ JSON пиково хочет ~200–300 МБ |
-| Релиз создался, а коммит в main нет | Смотри лог `git push` в конце тика; повторный тик докоммитит (идемпотентно) |
+В репозитории настроен `.github/workflows/docker-ci.yml`:
+- При каждом `git push` в ветку `main` GitHub Actions:
+  1. Запускает unit-тесты (`unittest`).
+  2. Собирает Docker-образ и публикует его в GitHub Container Registry (`ghcr.io/i3sey/pipensx-catalog:latest`).
+- Ваш VPS автоматически получит обновленную версию раннера при следующем тике cron (`docker compose pull`).
