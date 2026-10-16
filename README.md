@@ -119,9 +119,9 @@ python3 scrape.py \
 - `mode: probe` reports basic connectivity without publishing. The default
   lightweight Docker image has `curl_cffi` but no Chrome/UC installation, so
   it cannot perform the browser fallback described above.
-- GitHub Actions runs daily at 06:23 UTC: recent Atom topics plus a rotating
-  window of 120 older topics. It only creates a release when catalog content
-  changes. `workflow_dispatch` supports connectivity probes and explicit IDs.
+- GitHub Actions `build-catalog.yml` is manual-only (`workflow_dispatch`), used
+  for connectivity probes and explicit IDs. Daily scheduled catalog updates
+  are fully delegated to the VPS runner via Docker & FlareSolverr.
 - The feed host's `robots.txt` currently disallows crawlers. Automated polling
   is therefore kept to a low daily frequency; check RuTracker's rules before
   enabling a persistent schedule.

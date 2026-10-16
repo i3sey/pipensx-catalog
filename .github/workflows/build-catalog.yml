@@ -1,8 +1,6 @@
 name: Build catalog
 
 on:
-  schedule:
-    - cron: "23 6 * * *"
   workflow_dispatch:
     inputs:
       mode:
