@@ -689,8 +689,17 @@ class TitleDBMatcher:
         if not title:
             return None
 
+        title_low = title.lower()
+        if (
+            "[mp4" in title_low or ".mp4" in title_low or
+            "mig switch" in title_low or "migswitch" in title_low or
+            "эмулятор" in title_low or "emulator" in title_low or
+            "инструкция" in title_low
+        ):
+            return None
+
         norm = normalize_game_name(title)
-        if not norm:
+        if not norm or len(norm) < 3 or norm.isdigit():
             return None
 
         # Exact match
@@ -699,7 +708,7 @@ class TitleDBMatcher:
 
         # Substring / word prefix match
         words = norm.split()
-        if len(words) >= 2:
+        if len(words) >= 2 and len(norm) >= 5:
             prefix_2 = " ".join(words[:2])
             for db_name, tid in self._name_to_id.items():
                 if db_name == prefix_2 or db_name.startswith(f"{norm} ") or norm.startswith(f"{db_name} "):
