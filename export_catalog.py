@@ -32,6 +32,19 @@ MAX_CATALOG_BYTES = 48 * 1024 * 1024
 MAX_CATALOG_ENTRIES = 20000
 
 
+def estimate_published_date(topic_id: int) -> int:
+    """Monotonic timestamp estimate for topics that have no registered timestamp."""
+    # Anchors:
+    # 5622623 -> 2018-10-01 (1538352000)
+    # 6922509 -> 2026-10-14 (1791978000)
+    if topic_id <= 5622623:
+        return 1538352000
+    if topic_id >= 6922509:
+        return 1791978000
+    ratio = (topic_id - 5622623) / (6922509 - 5622623)
+    return int(1538352000 + ratio * (1791978000 - 1538352000))
+
+
 def load_overrides(overrides_path: Path) -> dict[str, Any]:
     """Load overrides.json if it exists."""
     if not overrides_path.exists():
@@ -179,6 +192,13 @@ def export_catalog(
         interface_langs = [l for l in langs.get("interface", []) if isinstance(l, str)]
         voice_langs = [l for l in langs.get("voice", []) if isinstance(l, str)]
 
+        # Published date resolution
+        pub_date = raw.get("published_date")
+        if not pub_date or int(pub_date) <= 0:
+            pub_date = estimate_published_date(int(raw["topic_id"])) if raw.get("topic_id") else now_ts
+        else:
+            pub_date = int(pub_date)
+
         entry = {
             "title": title[:1024],
             "magnet": magnet,
@@ -186,7 +206,7 @@ def export_catalog(
             "size": size_bytes,
             "size_bytes": size_bytes,
             "catalog_generated_at": raw.get("catalog_generated_at") or now_ts,
-            "published_date": raw.get("published_date") or now_ts,
+            "published_date": pub_date,
         }
 
         if raw.get("topic_id"):
@@ -219,8 +239,8 @@ def export_catalog(
 
         clean_entries.append(entry)
 
-    # Sort entries deterministically by title
-    clean_entries.sort(key=lambda x: x.get("title", "").casefold())
+    # Sort entries deterministically by newest published_date desc, topic_id desc, title asc
+    clean_entries.sort(key=lambda x: (-int(x.get("published_date", 0) or 0), -int(x.get("topic_id", 0) or 0), x.get("title", "").casefold()))
 
     # Validate against schema
     schema_p = Path(schema_path)

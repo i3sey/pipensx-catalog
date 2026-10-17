@@ -232,17 +232,24 @@ class Scraper:
             # 2. Fetch viewtorrent.php via POST (requires session cookies)
             torrent_html = self.flaresolverr.post_request(TORRENT_URL, {"t": str(topic_id)})
 
-            # 3. Parse filelist from viewtorrent
-            filelist = parse_viewtorrent_filelist(torrent_html)
-            file_meta = extract_from_filelist(filelist)
-
-            # 4. Parse topic metadata from viewtopic
+            # 3. Parse topic metadata from viewtopic
             topic_meta = parse_topic_metadata(topic_html, topic_id=topic_id)
+
+            # 4. Parse filelist from viewtorrent
+            filelist = parse_viewtorrent_filelist(torrent_html)
+            file_meta = extract_from_filelist(filelist, raw_title=topic_meta.get("title") or "")
+
+            title_low = (topic_meta.get("title") or "").lower()
+            is_port = (
+                "[nro" in title_low or ".nro" in title_low or
+                "хоумбрю" in title_low or "homebrew" in title_low or
+                "(порт" in title_low or " порт" in title_low or "порт)" in title_low or "порты" in title_low
+            )
 
             # Resolve TitleID:
             # Priority: Filelist Base TID -> Topic text TID -> TitleDB Matcher
             title_id = file_meta.get("title_id") or topic_meta.get("title_id")
-            if not title_id:
+            if not title_id and not is_port:
                 title_id = self.titledb.match(topic_meta.get("title") or "")
 
             # Ensure valid base TitleID
@@ -299,7 +306,7 @@ class Scraper:
                 "description": topic_meta.get("description"),
                 "languages": topic_meta.get("languages") or {"interface": [], "voice": []},
                 "catalog_generated_at": now_ts,
-                "published_date": now_ts,
+                "published_date": topic_meta.get("posted_at") or now_ts,
             }
 
             self.storage.save_catalog_entry(topic_id, title_id, entry)

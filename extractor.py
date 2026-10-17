@@ -204,8 +204,9 @@ def parse_viewtorrent_filelist(html_body: str) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
 
     # Strategy 1: RuTracker ftree structure: <b>filename</b>...<i>size_in_bytes</i>
+    # Matches files in the torrent tree (files have <i>bytes</i>)
     ftree_matches = re.finditer(
-        r"<b>(?P<name>[^<]+\.(?:nsp|nsz|xci|nro|zip|7z))</b>(?:<s>.*?</s>)?(?:<i>(?P<bytes>\d+)</i>)?",
+        r"<b>(?P<name>[^<]+)</b>(?:<s>.*?</s>)?(?:<i>(?P<bytes>\d+)</i>)",
         html_body,
         flags=re.IGNORECASE,
     )
@@ -213,12 +214,25 @@ def parse_viewtorrent_filelist(html_body: str) -> list[dict[str, Any]]:
         name = clean_html_text(m.group("name"))
         byte_str = m.group("bytes")
         size = int(byte_str) if byte_str and byte_str.isdigit() else None
-        if not size:
-            # Fallback to parsing human size from name if present, e.g. (1.5 GB)
-            size_m = re.search(r"\(([0-9.,]+\s*[KMGTP]?B)\)", name, re.IGNORECASE)
-            if size_m:
-                size = parse_size_bytes(size_m.group(1))
         files.append({"name": name, "size": size})
+
+    if not files:
+        # Fallback if <i> is not present or structured differently
+        ftree_matches = re.finditer(
+            r"<b>(?P<name>[^<]+\.(?:nsp|nsz|xci|nro|zip|7z))</b>(?:<s>.*?</s>)?(?:<i>(?P<bytes>\d+)</i>)?",
+            html_body,
+            flags=re.IGNORECASE,
+        )
+        for m in ftree_matches:
+            name = clean_html_text(m.group("name"))
+            byte_str = m.group("bytes")
+            size = int(byte_str) if byte_str and byte_str.isdigit() else None
+            if not size:
+                # Fallback to parsing human size from name if present, e.g. (1.5 GB)
+                size_m = re.search(r"\(([0-9.,]+\s*[KMGTP]?B)\)", name, re.IGNORECASE)
+                if size_m:
+                    size = parse_size_bytes(size_m.group(1))
+            files.append({"name": name, "size": size})
 
     if files:
         return files
@@ -288,7 +302,7 @@ def parse_viewtorrent_filelist(html_body: str) -> list[dict[str, Any]]:
     return files
 
 
-def extract_from_filelist(filelist: list[dict[str, Any]]) -> dict[str, Any]:
+def extract_from_filelist(filelist: list[dict[str, Any]], raw_title: str = "") -> dict[str, Any]:
     """Extract TitleIDs, versions, content types, and package types from files list."""
     base_tids: set[str] = set()
     update_tids: set[str] = set()
@@ -354,6 +368,17 @@ def extract_from_filelist(filelist: list[dict[str, Any]]) -> dict[str, Any]:
         if pkg in package_types:
             primary_pkg = pkg
             break
+
+    # If title indicates an NRO port or homebrew, prioritize nro and drop forwarder TID
+    title_low = raw_title.lower() if raw_title else ""
+    is_port = (
+        "[nro" in title_low or ".nro" in title_low or
+        "хоумбрю" in title_low or "homebrew" in title_low or
+        "(порт" in title_low or " порт" in title_low or "порт)" in title_low or "порты" in title_low
+    )
+    if is_port and "nro" in package_types:
+        primary_pkg = "nro"
+        chosen_base_tid = None
 
     # Highest version
     version_str: str | None = None
@@ -469,13 +494,44 @@ def parse_topic_metadata(html_body: str, topic_id: int) -> dict[str, Any]:
     # Extract images
     cover, screenshots = extract_topic_images(post_html)
 
+    # Normalize HTML entities and whitespace around header fields
+    norm_html = html_lib.unescape(re.sub(r"&nbsp;|\xa0", " ", html_body))
+
     # Extract registered timestamp if present
-    reg_match = re.search(r'Зарегистрирован:.*?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', html_body)
+    reg_match = re.search(r'Зарегистрирован:\s*(?:<[^>]+>\s*)*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', norm_html)
     registered_at = reg_match.group(1) if reg_match else None
 
     # Extract size from html
-    size_match = re.search(r'Размер:.*?([0-9.,]+\s*(?:[KMGTP]?B|байт|кб|мб|гб|тб))', html_body, re.IGNORECASE)
-    size_bytes = parse_size_bytes(size_match.group(1)) if size_match else None
+    size_match = re.search(
+        r"Размер:\s*(?:<[^>]+>\s*)*([0-9.,]+)\s*(?:<[^>]+>\s*)*([KMGTP]?B|байт|кб|мб|гб|тб)",
+        norm_html,
+        re.IGNORECASE,
+    )
+    size_bytes = parse_size_bytes(f"{size_match.group(1)} {size_match.group(2)}") if size_match else None
+
+    # Extract post time from viewtopic post link: <a href="viewtopic.php?p=...">DD-Mon-YY HH:MM</a>
+    post_time = None
+    post_match = re.search(
+        r'viewtopic\.php\?p=\d+#\d+">(\d{2})-([А-Яа-я]+)-(\d{2})\s+(\d{2}):(\d{2})</a>',
+        html_body,
+    )
+    if post_match:
+        day = int(post_match.group(1))
+        mon_str = post_match.group(2)[:3]
+        yr = int(post_match.group(3)) + 2000
+        hr = int(post_match.group(4))
+        mn = int(post_match.group(5))
+        ru_months = {
+            'Янв': 1, 'Фев': 2, 'Мар': 3, 'Апр': 4, 'Май': 5, 'Июн': 6,
+            'Июл': 7, 'Авг': 8, 'Сен': 9, 'Окт': 10, 'Ноя': 11, 'Дек': 12
+        }
+        mon = ru_months.get(mon_str)
+        if mon:
+            try:
+                dt_obj = dt.datetime(yr, mon, day, hr, mn, tzinfo=dt.timezone.utc)
+                post_time = int(dt_obj.timestamp())
+            except Exception:
+                pass
 
     # TitleID fallback from title or post text
     tids_in_title = TITLE_ID_BRACKET_RE.findall(raw_title) or TITLE_ID_RE.findall(raw_title)
@@ -519,6 +575,7 @@ def parse_topic_metadata(html_body: str, topic_id: int) -> dict[str, Any]:
         "cover": cover,
         "screenshots": screenshots,
         "registered_at": registered_at,
+        "posted_at": post_time,
         "size_bytes": size_bytes,
         "title_id": fallback_tid,
         "year": year,

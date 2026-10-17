@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-15T11:39:54Z",
-  "catalogCommit": "55aef7965dcabb75b01a29bbe72a51d27a54aa39",
-  "sourceCommit": "rutracker-atom+topic-pages",
+  "generatedAt": "2026-10-17T17:35:11Z",
+  "catalogCommit": "local",
+  "sourceCommit": "local",
   "catalog": {
     "url": "https://github.com/i3sey/pipensx-catalog/releases/latest/download/catalog.json",
-    "sha256": "8afc4fd7212c9ceca2f977affe45e313c945cb6537ca68129dc17cfe3ebaab3c",
-    "bytes": 22776506,
-    "entries": 7094
+    "sha256": "036512189d87a4d4a8e30e15aab4b01b80564b0905c361bcd4b9d8539ce065ae",
+    "bytes": 24729119,
+    "entries": 7244
   }
 }

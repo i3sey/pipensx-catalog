@@ -22,6 +22,7 @@ from extractor import (
     TitleDBMatcher,
     info_hash_from_magnet,
     is_base_title_id,
+    parse_size_bytes,
     to_base_title_id,
 )
 from flaresolverr_client import FlareSolverrClient
@@ -188,7 +189,15 @@ def cmd_seed(args: argparse.Namespace) -> int:
         url = entry.get("url") or f"https://rutracker.org/forum/viewtopic.php?t={topic_id}"
         title = entry.get("title")
         title_id = entry.get("title_id")
-        size_bytes = entry.get("size_bytes") or entry.get("size")
+        size_raw = entry.get("size_bytes") or entry.get("size")
+        size_bytes = None
+        if isinstance(size_raw, str):
+            size_bytes = parse_size_bytes(size_raw)
+        elif isinstance(size_raw, (int, float)):
+            size_bytes = int(size_raw)
+        if size_bytes:
+            entry["size_bytes"] = size_bytes
+            entry["size"] = size_bytes
         magnet = entry.get("magnet")
         info_hash = info_hash_from_magnet(magnet)
 
@@ -202,7 +211,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
         storage.save_topic_details(
             topic_id=int(topic_id),
             info_hash=info_hash,
-            size_bytes=int(size_bytes) if size_bytes else None,
+            size_bytes=size_bytes,
         )
         storage.save_catalog_entry(
             topic_id=int(topic_id),

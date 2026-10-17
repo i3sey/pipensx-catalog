@@ -1,24 +1,18 @@
 # pipensx-catalog build report
 
-- generatedAt: `2026-10-15T11:39:54Z`
-- sourceCommit: `rutracker-atom+topic-pages`
-- entries: **7094** (42 seed)
-- bytes: 22776506
-- sha256: `8afc4fd7212c9ceca2f977affe45e313c945cb6537ca68129dc17cfe3ebaab3c`
-- title_id coverage: 96.6% (missing 241)
+- generatedAt: `2026-10-17T17:35:11Z`
+- sourceCommit: `local`
+- entries: **7244** (7245 raw in SQLite)
+- bytes: 24729119
+- sha256: `036512189d87a4d4a8e30e15aab4b01b80564b0905c361bcd4b9d8539ce065ae`
+- title_id coverage: 96.2% (missing 274)
 
 ## Pipeline
 
 - dropped (no/invalid magnet): 0
 - dropped (no size): 0
-- dropped (no cover): 0
+- dropped (no cover): 1
 - hidden by overrides: 0
 - deduped by infoHash: 0
-- http:// covers kept (P0 seed compat): 0
 - title_id overrides applied: 0
 - renames applied: 0
-- Atom entries checked: 50
-- existing entries refreshed from Atom fallback: 42
-- Atom entries awaiting page enrichment: 8
-
-_Unmatched title_id rows are expected (homebrew/ports without an eShop record); they stay in the catalog, only the coverage counts them._
